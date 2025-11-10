@@ -1,6 +1,8 @@
 package com.jpmc.midascore.component;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jpmc.midascore.entity.TransactionRecord;
+import com.jpmc.midascore.entity.UserRecord;
 import com.jpmc.midascore.foundation.Transaction;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
@@ -12,6 +14,11 @@ import org.springframework.stereotype.Service;
 public class KafkaConsumerService {
     private static final Logger logger = LoggerFactory.getLogger(KafkaConsumerService.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final DatabaseConduit databaseConduit;
+
+    public KafkaConsumerService(DatabaseConduit databaseConduit) {
+        this.databaseConduit = databaseConduit;
+    }
 
     //This transforms the listen() method into a Kafka listener.
     @KafkaListener(topics = "${general.kafka-topic}", groupId = "midas-core-group")
@@ -25,7 +32,40 @@ public class KafkaConsumerService {
             //Log messages to the console.
             logger.info("Received message: {}", transaction);
 
-            System.out.println("Received message: " + transaction);
+            //Validate sender
+            UserRecord sender = databaseConduit.findUserById(transaction.getSenderId());
+            if (sender == null){
+                logger.warn("Sender not found: {}", transaction.getSenderId());
+                return;
+            }
+
+            //Validate recipient
+            UserRecord recipient = databaseConduit.findUserById(transaction.getRecipientId());
+            if (recipient == null){
+                logger.warn("Recipient not found: {}", transaction.getRecipientId());
+                return;
+            }
+
+            //Validate sender balance
+            if (sender.getBalance() < transaction.getAmount()){
+                logger.warn("Insufficient funds: {}", transaction);
+                return;
+            }
+
+            //Update amount
+            sender.setBalance(sender.getBalance() - transaction.getAmount());
+            recipient.setBalance(recipient.getBalance() + transaction.getAmount());
+
+            //Save sender and recipient
+            databaseConduit.save(sender);
+            databaseConduit.save(recipient);
+
+            //Save transaction record
+            TransactionRecord transactionRecord = new TransactionRecord(sender, recipient, transaction.getAmount());
+            databaseConduit.saveTransaction(transactionRecord);
+
+            logger.info("Transaction processed: {}", transactionRecord);
+
         } catch (Exception e) {
             logger.error("Error parsing message: {}", payload, e);
         }
